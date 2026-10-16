@@ -10,6 +10,11 @@ class ProductSerializer(serializers.ModelSerializer):
     Serializer for Product creation, update, and retrieval.
     """
     created_by_username = serializers.ReadOnlyField(source='created_by.username')
+    image_url = serializers.CharField(
+        max_length=1000,
+        required=True,
+        help_text="Public image URL or local relative media path"
+    )
 
     class Meta:
         model = Product
@@ -60,8 +65,8 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def validate_image_url(self, value):
         stripped = value.strip()
-        if not (stripped.startswith('http://') or stripped.startswith('https://')):
-            raise serializers.ValidationError("Image URL must begin with http:// or https://.")
+        if not (stripped.startswith('http://') or stripped.startswith('https://') or stripped.startswith('/')):
+            raise serializers.ValidationError("Image URL must begin with http://, https://, or /.")
         return stripped
 
     def validate_tags(self, value):

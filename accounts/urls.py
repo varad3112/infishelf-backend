@@ -7,15 +7,15 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from drf_spectacular.utils import extend_schema, extend_schema_view
-from .views import RegisterView, CurrentUserView
+from .views import RegisterView, CurrentUserView, CustomTokenObtainPairView
 
 # SimpleJWT views with Swagger schema documentation
 DecoratedTokenObtainPairView = extend_schema_view(
     post=extend_schema(
         summary="User login (Obtain JWT tokens)",
-        description="Takes username and password credentials and returns JWT access and refresh token pair."
+        description="Takes username or email and password credentials and returns JWT access and refresh token pair."
     )
-)(TokenObtainPairView)
+)(CustomTokenObtainPairView)
 
 DecoratedTokenRefreshView = extend_schema_view(
     post=extend_schema(

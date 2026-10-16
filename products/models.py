@@ -11,6 +11,8 @@ class Product(models.Model):
     """
     Model representing a retail/CPG product in the InfiShelf catalog.
     """
+    objects = models.Manager()
+
     id = models.UUIDField(
         primary_key=True,
         default=uuid.uuid4,
@@ -41,9 +43,9 @@ class Product(models.Model):
         validators=[MinValueValidator(Decimal('0.01'))],
         help_text="Unit price in USD (must be >= 0.01)"
     )
-    image_url = models.URLField(
+    image_url = models.CharField(
         max_length=1000,
-        help_text="Public HTTPS URL pointing to the product image"
+        help_text="Public HTTPS URL or relative local path pointing to the product image"
     )
     tags = models.JSONField(
         default=list,
