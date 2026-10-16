@@ -1,0 +1,3 @@
+"""
+Products app package.
+"""
