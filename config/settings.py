@@ -199,11 +199,33 @@ else:
         'http://127.0.0.1:3000',
     ]
 
-# In debug mode, allow localhost origins smoothly
+# Allow any Vercel or Netlify preview / production URL automatically
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https:\/\/.*\.vercel\.app$",
+    r"^https:\/\/.*\.netlify\.app$",
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
+# In debug mode, allow all origins smoothly
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 
-CORS_ALLOW_CREDENTIALS = True
+# CSRF Trusted Origins for Render, Vercel, and Netlify
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:3000',
+    'https://*.vercel.app',
+    'https://*.netlify.app',
+    'https://*.onrender.com',
+]
+if render_external_hostname:
+    CSRF_TRUSTED_ORIGINS.append(f'https://{render_external_hostname}')
+for origin in CORS_ALLOWED_ORIGINS:
+    if origin.startswith('http') and origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(origin)
 
 # OpenAPI / Swagger Specification (drf-spectacular)
 SPECTACULAR_SETTINGS = {
