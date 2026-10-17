@@ -7,7 +7,6 @@ from django.http import JsonResponse
 from drf_spectacular.views import (
     SpectacularAPIView,
     SpectacularSwaggerView,
-    SpectacularRedocView
 )
 
 def api_health(request):
@@ -34,10 +33,9 @@ urlpatterns = [
     path('api/auth/', include('accounts.urls')),
     path('api/products/', include('products.urls')),
 
-    # OpenAPI 3.0 Documentation (drf-spectacular)
+    # OpenAPI 3.0 Documentation (Swagger UI)
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
-    path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 ]
 
 if settings.DEBUG:

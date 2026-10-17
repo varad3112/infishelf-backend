@@ -2,6 +2,7 @@
 Views and ViewSets for Product catalog management and GenAI actions.
 Keeps views thin and delegates logic to models, serializers, and services.
 """
+import logging
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -15,11 +16,14 @@ from .models import Product
 from .serializers import (
     ProductSerializer,
     AiGenerateDescriptionSerializer,
-    AiSmartSearchSerializer
+    AiSmartSearchSerializer,
+    CatalogCopilotRequestSerializer
 )
 from .filters import ProductFilter
-from .services import ai_service
+from .services import ai_service, catalog_copilot, csv_service
 from config.pagination import StandardProductPagination
+
+logger = logging.getLogger(__name__)
 
 class ProductViewSet(viewsets.ModelViewSet):
     """
@@ -37,10 +41,10 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         """
-        Public permissions for catalog reads, statistics, and smart search.
-        Authenticated permissions for mutations and AI description generation.
+        Public permissions for catalog reads, statistics, smart search, and bulk template.
+        Authenticated permissions for mutations, bulk upload, and AI description generation.
         """
-        if self.action in ['list', 'retrieve', 'smart_search', 'statistics']:
+        if self.action in ['list', 'retrieve', 'smart_search', 'statistics', 'copilot', 'bulk_template']:
             return [AllowAny()]
         return [IsAuthenticated()]
 
@@ -49,12 +53,13 @@ class ProductViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
         from django.core.cache import cache
         cache.delete("catalog:statistics")
+        cache.delete_many(["catalog:statistics", "catalog:summary"])
 
     def perform_update(self, serializer):
         """Update product and invalidate catalog stats cache."""
         serializer.save()
         from django.core.cache import cache
-        cache.delete("catalog:statistics")
+        cache.delete_many(["catalog:statistics", "catalog:summary"])
 
     def perform_destroy(self, instance):
         """Delete product and invalidate catalog stats cache."""
@@ -77,7 +82,105 @@ class ProductViewSet(viewsets.ModelViewSet):
         ]
     )
     def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+        search_query = request.query_params.get('search', '').strip()
+        queryset = self.filter_queryset(self.get_queryset())
+        is_ai_fallback = False
+        parsed_intent = None
+
+        if search_query:
+            if not queryset.exists():
+                logger.info(
+                    "🔍 [Search] Standard keyword search for '%s' returned 0 results. Triggering internal LLM semantic search fallback...",
+                    search_query
+                )
+                try:
+                    parsed_intent = ai_service.parse_natural_language_query(search_query)
+                    logger.info(
+                        "🧠 [LLM Search] Parsed intent for '%s': Category=%s | Brand=%s | MinPrice=%s | MaxPrice=%s | Keywords=%s | Source=%s",
+                        search_query,
+                        parsed_intent.get('category'),
+                        parsed_intent.get('brand'),
+                        parsed_intent.get('min_price'),
+                        parsed_intent.get('max_price'),
+                        parsed_intent.get('keywords'),
+                        parsed_intent.get('source')
+                    )
+                    smart_qs = ai_service.build_smart_search_queryset(self.get_queryset(), parsed_intent)
+
+                    # Also apply any active query params chosen in filters
+                    category_filter = request.query_params.get('category', '').strip()
+                    if category_filter and category_filter != 'All Categories':
+                        smart_qs = smart_qs.filter(category__iexact=category_filter)
+
+                    brand_filter = request.query_params.get('brand', '').strip()
+                    if brand_filter:
+                        brands = [b.strip() for b in brand_filter.split(',') if b.strip()]
+                        if len(brands) == 1:
+                            smart_qs = smart_qs.filter(brand__iexact=brands[0])
+                        elif len(brands) > 1:
+                            smart_qs = smart_qs.filter(brand__in=brands)
+
+                    min_p = request.query_params.get('min_price')
+                    if min_p:
+                        try:
+                            smart_qs = smart_qs.filter(price__gte=float(min_p))
+                        except (ValueError, TypeError):
+                            pass
+
+                    max_p = request.query_params.get('max_price')
+                    if max_p:
+                        try:
+                            smart_qs = smart_qs.filter(price__lte=float(max_p))
+                        except (ValueError, TypeError):
+                            pass
+
+                    ordering = request.query_params.get('ordering')
+                    if ordering:
+                        smart_qs = smart_qs.order_by(ordering)
+
+                    match_count = smart_qs.count()
+                    tokens_info = parsed_intent.get('token_usage') if parsed_intent else None
+                    if tokens_info:
+                        logger.info(
+                            "✨ [LLM Search] Retrieved %d product(s) for query '%s' | LLM Tokens: %d (Prompt: %d, Response: %d)",
+                            match_count,
+                            search_query,
+                            tokens_info.get('total_tokens', 0),
+                            tokens_info.get('prompt_tokens', 0),
+                            tokens_info.get('candidate_tokens', 0)
+                        )
+                    else:
+                        logger.info(
+                            "✨ [LLM Search] Retrieved %d product(s) matching internal semantic query for '%s'.",
+                            match_count,
+                            search_query
+                        )
+                    queryset = smart_qs
+                    is_ai_fallback = True
+                except Exception as ex:
+                    logger.error("⚠️ [LLM Search] Exception during internal LLM fallback: %s", ex, exc_info=True)
+            else:
+                logger.info(
+                    "✅ [Search] Standard keyword search for '%s' directly matched %d product(s). No LLM needed.",
+                    search_query,
+                    queryset.count()
+                )
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            if is_ai_fallback:
+                response.data['ai_fallback'] = True
+                response.data['parsed_intent'] = parsed_intent
+            return response
+
+        serializer = self.get_serializer(queryset, many=True)
+        resp_data = {"results": serializer.data}
+        if is_ai_fallback:
+            resp_data['ai_fallback'] = True
+            resp_data['parsed_intent'] = parsed_intent
+        return Response(resp_data)
 
     @extend_schema(
         summary="Create product",
@@ -162,6 +265,15 @@ class ProductViewSet(viewsets.ModelViewSet):
             brand=serializer.validated_data['brand'],
             category=serializer.validated_data['category']
         )
+        tokens_info = result.get('token_usage')
+        if tokens_info:
+            logger.info(
+                "🏷️ [AI Description] Generated for '%s' | LLM Tokens: %d (Prompt: %d, Completion: %d)",
+                serializer.validated_data['name'],
+                tokens_info.get('total_tokens', 0),
+                tokens_info.get('prompt_tokens', 0),
+                tokens_info.get('candidate_tokens', 0)
+            )
         return Response({"success": True, "data": result}, status=status.HTTP_200_OK)
 
     @extend_schema(
@@ -192,6 +304,37 @@ class ProductViewSet(viewsets.ModelViewSet):
             "parsed_intent": parsed_filters,
             "results": serializer.data
         })
+
+    @extend_schema(
+        summary="AI: Conversational Analytics Copilot",
+        description="Translates plain-English catalog and business questions into safe Django ORM aggregations and returns structured answers with product cards.",
+        request=CatalogCopilotRequestSerializer,
+        responses={200: OpenApiResponse(description="Copilot analysis with answer, stats, and relevant product cards")}
+    )
+    @action(detail=False, methods=['post'], url_path='ai/copilot', permission_classes=[AllowAny])
+    def copilot(self, request):
+        serializer = CatalogCopilotRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user_query = serializer.validated_data['query']
+        history = serializer.validated_data.get('history', [])
+
+        result = catalog_copilot.ask_catalog_copilot(user_query, history)
+
+        tokens_info = result.get('tokens')
+        if tokens_info:
+            logger.info(
+                "💬 [Catalog Copilot] Query '%s' -> Total LLM Tokens: %d (Prompt: %d, Completion: %d)",
+                user_query,
+                tokens_info.get('total_tokens', 0),
+                tokens_info.get('prompt_tokens', 0),
+                tokens_info.get('candidate_tokens', 0)
+            )
+
+        return Response({
+            "success": True,
+            "data": result
+        }, status=status.HTTP_200_OK)
 
     @extend_schema(
         summary="Catalog Statistics & Analytics",
@@ -349,4 +492,57 @@ class ProductViewSet(viewsets.ModelViewSet):
             "image_url": image_url,
             "relative_url": settings.MEDIA_URL + saved_name
         }, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        summary="Bulk Upload Products via CSV",
+        description="Upload a CSV file containing multiple products for batch validation and creation. Requires JWT authentication.",
+        request={
+            'multipart/form-data': {
+                'type': 'object',
+                'properties': {
+                    'file': {
+                        'type': 'string',
+                        'format': 'binary',
+                        'description': 'CSV file with headers: name, brand, category, price, description, image_url, tags'
+                    }
+                },
+                'required': ['file']
+            }
+        },
+        responses={
+            201: OpenApiResponse(description="Bulk upload processed successfully with metrics and error report"),
+            400: OpenApiResponse(description="Invalid request or file format")
+        }
+    )
+    @action(detail=False, methods=['post'], url_path='bulk-upload', permission_classes=[IsAuthenticated])
+    def bulk_upload(self, request):
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response(
+                {"success": False, "error": "No CSV file provided. Please upload a file under the 'file' field."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not file_obj.name.lower().endswith('.csv'):
+            return Response(
+                {"success": False, "error": "Uploaded file must be a CSV (.csv) file."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        result = csv_service.parse_and_bulk_create_products(file_obj, request.user)
+        status_code = status.HTTP_201_CREATED if result.get('created_count', 0) > 0 else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=status_code)
+
+    @extend_schema(
+        summary="Download Sample CSV Template for Bulk Upload",
+        description="Returns a starter CSV template with example CPG items for bulk catalog upload.",
+        responses={200: OpenApiResponse(description="Sample CSV text/template file")}
+    )
+    @action(detail=False, methods=['get'], url_path='bulk-template', permission_classes=[AllowAny])
+    def bulk_template(self, request):
+        from django.http import HttpResponse
+        csv_content = csv_service.generate_sample_csv_template()
+        response = HttpResponse(csv_content, content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="infishelf_sample_products.csv"'
+        return response
 

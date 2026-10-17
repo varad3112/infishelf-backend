@@ -84,11 +84,18 @@ DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
 DB_SCHEMA = os.getenv('DB_SCHEMA', '').strip()
 
 if DATABASE_URL:
+    # When connecting via Supabase poolers (session or transaction mode),
+    # conn_max_age must be 0 so connections are returned immediately to the pool.
+    is_pooler = 'pooler.supabase.com' in DATABASE_URL or ':6543' in DATABASE_URL
+    conn_age = 0 if is_pooler else int(os.getenv('CONN_MAX_AGE', '60'))
+
     db_config = dj_database_url.parse(
         DATABASE_URL,
-        conn_max_age=600,
+        conn_max_age=conn_age,
         ssl_require=True
     )
+    db_config['CONN_HEALTH_CHECKS'] = True
+
     # If a custom schema (e.g., 'infishelf') is configured, set PostgreSQL search_path
     if DB_SCHEMA:
         db_config.setdefault('OPTIONS', {})['options'] = f'-c search_path={DB_SCHEMA},public'
@@ -239,3 +246,32 @@ SPECTACULAR_SETTINGS = {
 
 # Gemini API Key
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
+
+# Structured Console Logging
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{asctime}] {levelname} [{name}]: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'products': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}

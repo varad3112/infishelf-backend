@@ -38,5 +38,30 @@ def custom_exception_handler(exc, context):
             'message': message,
             'errors': errors
         }
+        return response
 
-    return response
+    # Handle unhandled database / operational exceptions gracefully so API always returns JSON, never HTML
+    from django.db import DatabaseError, OperationalError
+    if isinstance(exc, (OperationalError, DatabaseError)):
+        return Response(
+            {
+                'success': False,
+                'message': 'Database connection busy or temporarily unavailable. Please try again shortly.',
+                'errors': {
+                    'database': [str(exc)]
+                }
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
+    # Return standard JSON for any other uncaught API exceptions
+    return Response(
+        {
+            'success': False,
+            'message': 'An unexpected server error occurred. Please try again later.',
+            'errors': {
+                'server': [str(exc)]
+            }
+        },
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
