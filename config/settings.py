@@ -81,13 +81,13 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database Configuration (Supabase PostgreSQL with SQLite fallback)
 DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
-DB_SCHEMA = os.getenv('DB_SCHEMA', '').strip()
+DB_SCHEMA = os.getenv('DB_SCHEMA', 'infishelf').strip()
 
 if DATABASE_URL:
-    # When connecting via Supabase poolers (session or transaction mode),
-    # conn_max_age must be 0 so connections are returned immediately to the pool.
-    is_pooler = 'pooler.supabase.com' in DATABASE_URL or ':6543' in DATABASE_URL
-    conn_age = 0 if is_pooler else int(os.getenv('CONN_MAX_AGE', '60'))
+    # Port 6543 is PgBouncer Transaction Mode (requires conn_max_age=0)
+    # Port 5432 is Supabase Session Mode Pooler / Direct DB (supports persistent connections)
+    is_transaction_pooler = ':6543' in DATABASE_URL
+    conn_age = 0 if is_transaction_pooler else int(os.getenv('CONN_MAX_AGE', '60'))
 
     db_config = dj_database_url.parse(
         DATABASE_URL,
@@ -96,9 +96,19 @@ if DATABASE_URL:
     )
     db_config['CONN_HEALTH_CHECKS'] = True
 
-    # If a custom schema (e.g., 'infishelf') is configured, set PostgreSQL search_path
-    if DB_SCHEMA:
-        db_config.setdefault('OPTIONS', {})['options'] = f'-c search_path={DB_SCHEMA},public'
+    # Configure TCP keepalives and connect timeout to prevent remote pooler socket drops
+    options = db_config.setdefault('OPTIONS', {})
+    options.update({
+        'connect_timeout': 10,
+        'keepalives': 1,
+        'keepalives_idle': 30,
+        'keepalives_interval': 10,
+        'keepalives_count': 5,
+    })
+
+    # Ensure PostgreSQL search_path includes both infishelf and public schemas
+    search_path = f"{DB_SCHEMA},public" if DB_SCHEMA else "infishelf,public"
+    options['options'] = f'-c search_path={search_path}'
 
     DATABASES = {
         'default': db_config
