@@ -81,7 +81,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database Configuration (Supabase PostgreSQL with SQLite fallback)
 DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
-DB_SCHEMA = os.getenv('DB_SCHEMA', '').strip()
+DB_SCHEMA = os.getenv('DB_SCHEMA', 'infishelf').strip()
 
 if DATABASE_URL:
     # Port 6543 is PgBouncer Transaction Mode (requires conn_max_age=0)
@@ -106,9 +106,9 @@ if DATABASE_URL:
         'keepalives_count': 5,
     })
 
-    # If a custom schema (e.g., 'infishelf') is configured, set PostgreSQL search_path
-    if DB_SCHEMA:
-        options['options'] = f'-c search_path={DB_SCHEMA},public'
+    # Ensure PostgreSQL search_path includes both infishelf and public schemas
+    search_path = f"{DB_SCHEMA},public" if DB_SCHEMA else "infishelf,public"
+    options['options'] = f'-c search_path={search_path}'
 
     DATABASES = {
         'default': db_config

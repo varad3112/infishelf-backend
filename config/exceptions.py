@@ -42,7 +42,10 @@ def custom_exception_handler(exc, context):
 
     # Handle unhandled database / operational exceptions gracefully so API always returns JSON, never HTML
     from django.db import DatabaseError, OperationalError, connection
+    import logging
+    logger = logging.getLogger(__name__)
     if isinstance(exc, (OperationalError, DatabaseError)):
+        logger.error("Database operational error: %s", exc, exc_info=True)
         try:
             connection.close()
         except Exception:
