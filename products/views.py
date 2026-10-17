@@ -7,7 +7,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from django.db.models import Count, Avg, Min, Max, Sum
+from django.db.models import Count, Avg, Min, Max, Sum, Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
@@ -182,6 +182,22 @@ class ProductViewSet(viewsets.ModelViewSet):
             resp_data['parsed_intent'] = parsed_intent
         return Response(resp_data)
 
+    def _invalidate_stats_cache(self):
+        from django.core.cache import cache
+        cache.delete("catalog:statistics")
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        self._invalidate_stats_cache()
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        self._invalidate_stats_cache()
+
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        self._invalidate_stats_cache()
+
     @extend_schema(
         summary="Create product",
         description="Create a new product record. Requires JWT authentication.",
@@ -350,7 +366,23 @@ class ProductViewSet(viewsets.ModelViewSet):
             return Response(cached_stats)
 
         qs = Product.objects.all()
-        total_products = qs.count()
+
+        # Consolidate metrics, price tiers, and counts into a single SQL aggregation query
+        # to eliminate multiple sequential roundtrips over remote database connections.
+        aggs = qs.aggregate(
+            total_products=Count('id'),
+            avg_price=Avg('price'),
+            min_price=Min('price'),
+            max_price=Max('price'),
+            total_value=Sum('price'),
+            total_brands=Count('brand', distinct=True),
+            under_50=Count('id', filter=Q(price__lt=50)),
+            from_50_to_150=Count('id', filter=Q(price__gte=50, price__lt=150)),
+            from_150_to_300=Count('id', filter=Q(price__gte=150, price__lt=300)),
+            above_300=Count('id', filter=Q(price__gte=300)),
+        )
+
+        total_products = aggs['total_products'] or 0
 
         if total_products == 0:
             empty_stats = {
@@ -370,14 +402,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             cache.set(cache_key, empty_stats, timeout=600)
             return Response(empty_stats)
 
-        aggs = qs.aggregate(
-            avg_price=Avg('price'),
-            min_price=Min('price'),
-            max_price=Max('price'),
-            total_value=Sum('price')
-        )
-
-        categories_data = (
+        categories_data = list(
             qs.values('category')
             .annotate(count=Count('id'), avg_price=Avg('price'))
             .order_by('-count')
@@ -392,7 +417,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             for c in categories_data
         ]
 
-        brands_data = (
+        brands_data = list(
             qs.values('brand')
             .annotate(count=Count('id'))
             .order_by('-count')[:10]
@@ -403,13 +428,13 @@ class ProductViewSet(viewsets.ModelViewSet):
         ]
 
         price_ranges = [
-            {"label": "Under Rs. 50", "count": qs.filter(price__lt=50).count()},
-            {"label": "Rs. 50 - Rs. 150", "count": qs.filter(price__gte=50, price__lt=150).count()},
-            {"label": "Rs. 150 - Rs. 300", "count": qs.filter(price__gte=150, price__lt=300).count()},
-            {"label": "Above Rs. 300", "count": qs.filter(price__gte=300).count()},
+            {"label": "Under Rs. 50", "count": aggs['under_50'] or 0},
+            {"label": "Rs. 50 - Rs. 150", "count": aggs['from_50_to_150'] or 0},
+            {"label": "Rs. 150 - Rs. 300", "count": aggs['from_150_to_300'] or 0},
+            {"label": "Above Rs. 300", "count": aggs['above_300'] or 0},
         ]
 
-        recent = (
+        recent = list(
             qs.order_by('-created_at')[:5]
             .values('id', 'name', 'brand', 'category', 'price', 'image_url', 'created_at')
         )
@@ -418,7 +443,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             "success": True,
             "total_products": total_products,
             "total_categories": len(category_distribution),
-            "total_brands": qs.values('brand').distinct().count(),
+            "total_brands": aggs['total_brands'] or len(brand_distribution),
             "average_price": round(float(aggs['avg_price'] or 0), 2),
             "min_price": round(float(aggs['min_price'] or 0), 2),
             "max_price": round(float(aggs['max_price'] or 0), 2),
@@ -426,7 +451,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             "category_distribution": category_distribution,
             "brand_distribution": brand_distribution,
             "price_ranges": price_ranges,
-            "recent_products": list(recent)
+            "recent_products": recent
         }
         cache.set(cache_key, data, timeout=600)  # Cached for 10 minutes
         return Response(data)
@@ -530,6 +555,8 @@ class ProductViewSet(viewsets.ModelViewSet):
             )
 
         result = csv_service.parse_and_bulk_create_products(file_obj, request.user)
+        if result.get('created_count', 0) > 0:
+            self._invalidate_stats_cache()
         status_code = status.HTTP_201_CREATED if result.get('created_count', 0) > 0 else status.HTTP_400_BAD_REQUEST
         return Response(result, status=status_code)
 
