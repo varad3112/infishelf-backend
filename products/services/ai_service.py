@@ -8,6 +8,8 @@ import re
 import json
 import hashlib
 import logging
+import functools
+import operator
 from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Q
@@ -23,6 +25,7 @@ try:
     import google.generativeai as genai
     GENAI_AVAILABLE = True
 except ImportError:
+    genai = None
     GENAI_AVAILABLE = False
     logger.warning("google.generativeai not installed; using dynamic fallback.")
 
@@ -37,7 +40,7 @@ def get_gemini_model():
     gemini-3.5-flash-lite for maximum operational uptime and longevity.
     """
     api_key = getattr(settings, 'GEMINI_API_KEY', '') or os.getenv('GEMINI_API_KEY', '')
-    if not api_key or not GENAI_AVAILABLE:
+    if not api_key or not GENAI_AVAILABLE or genai is None:
         return None
 
     try:
@@ -65,7 +68,7 @@ def generate_product_description(name: str, brand: str, category: str) -> dict:
     if cached:
         cached_copy = dict(cached)
         cached_copy["source"] = "cache"
-        logger.info(f"⚡ [Cache Hit] Returning cached AI description for '{name}' (<5ms).")
+        logger.info(f"⚡ [Cache Hit] Returning cached AI description for '{name}' (<5ms, 0 tokens consumed).")
         return cached_copy
 
     result = None
@@ -106,6 +109,22 @@ Respond strictly in valid JSON format with no additional text:
 }}"""
     try:
         response = model.generate_content(prompt)
+
+        # Extract and log token usage from Gemini API response
+        usage = getattr(response, 'usage_metadata', None)
+        prompt_tokens = getattr(usage, 'prompt_token_count', 0) if usage else 0
+        candidate_tokens = getattr(usage, 'candidates_token_count', 0) if usage else 0
+        total_tokens = getattr(usage, 'total_token_count', 0) if usage else (prompt_tokens + candidate_tokens)
+
+        logger.info(
+            "📊 [LLM Token Usage] Gemini generate_description for '%s' -> Prompt: %d | Completion: %d | Total: %d tokens (Model: %s)",
+            name,
+            prompt_tokens,
+            candidate_tokens,
+            total_tokens,
+            ACTIVE_GEMINI_MODEL
+        )
+
         text = response.text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?", "", text)
@@ -118,6 +137,11 @@ Respond strictly in valid JSON format with no additional text:
             return {
                 "description": desc,
                 "tags": tags if isinstance(tags, list) else [],
+                "token_usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "candidate_tokens": candidate_tokens,
+                    "total_tokens": total_tokens
+                },
                 "source": "gemini"
             }
     except Exception as e:
@@ -140,7 +164,7 @@ def parse_natural_language_query(query: str) -> dict:
 
     cached = cache.get(cache_key)
     if cached:
-        logger.info(f"⚡ [Cache Hit] Returning cached smart search intent for: '{clean_query}'")
+        logger.info(f"⚡ [Cache Hit] Returning cached smart search intent for: '{clean_query}' (<5ms, 0 tokens consumed).")
         return cached
 
     # Fetch live distinct categories from the database for dynamic prompt grounding
@@ -181,6 +205,22 @@ Extract the search intent and respond strictly with valid JSON with no markdown 
 }}"""
     try:
         response = model.generate_content(prompt)
+
+        # Extract and log token usage from Gemini API response
+        usage = getattr(response, 'usage_metadata', None)
+        prompt_tokens = getattr(usage, 'prompt_token_count', 0) if usage else 0
+        candidate_tokens = getattr(usage, 'candidates_token_count', 0) if usage else 0
+        total_tokens = getattr(usage, 'total_token_count', 0) if usage else (prompt_tokens + candidate_tokens)
+
+        logger.info(
+            "📊 [LLM Token Usage] Gemini parse_search_query for '%s' -> Prompt: %d | Completion: %d | Total: %d tokens (Model: %s)",
+            query,
+            prompt_tokens,
+            candidate_tokens,
+            total_tokens,
+            ACTIVE_GEMINI_MODEL
+        )
+
         text = response.text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?", "", text)
@@ -200,6 +240,11 @@ Extract the search intent and respond strictly with valid JSON with no markdown 
             "keywords": keywords,
             "extracted_search": " ".join(keywords) if keywords else query,
             "summary": data.get("summary", f"Search for {query}"),
+            "token_usage": {
+                "prompt_tokens": prompt_tokens,
+                "candidate_tokens": candidate_tokens,
+                "total_tokens": total_tokens
+            },
             "source": "gemini"
         }
     except Exception as e:
@@ -309,8 +354,7 @@ def build_smart_search_queryset(base_queryset, parsed_filters: dict):
         'for', 'with', 'show', 'find', 'the', 'and', 'all', 'any'
     }
 
-    keyword_query = Q()
-    has_keywords = False
+    keyword_clauses = []
 
     for item in search_terms:
         for token in str(item).split():
@@ -323,15 +367,15 @@ def build_smart_search_queryset(base_queryset, parsed_filters: dict):
                 continue
 
             stem = word.rstrip('s') if len(word) > 3 else word
-            keyword_query |= (
-                Q(name__icontains=stem) |
-                Q(brand__icontains=stem) |
-                Q(description__icontains=stem) |
-                Q(tags__icontains=stem)
-            )
-            has_keywords = True
+            keyword_clauses.extend([
+                Q(name__icontains=stem),
+                Q(brand__icontains=stem),
+                Q(description__icontains=stem),
+                Q(tags__icontains=stem),
+            ])
 
-    if has_keywords:
+    if keyword_clauses:
+        keyword_query = functools.reduce(operator.or_, keyword_clauses)
         refined_qs = qs.filter(keyword_query)
         if refined_qs.exists() or (not cat and not brand):
             return refined_qs

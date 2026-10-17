@@ -12,7 +12,9 @@ class ProductSerializer(serializers.ModelSerializer):
     created_by_username = serializers.ReadOnlyField(source='created_by.username')
     image_url = serializers.CharField(
         max_length=1000,
-        required=True,
+        required=False,
+        allow_blank=True,
+        default='https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80',
         help_text="Public image URL or local relative media path"
     )
 
@@ -64,7 +66,9 @@ class ProductSerializer(serializers.ModelSerializer):
         return value
 
     def validate_image_url(self, value):
-        stripped = value.strip()
+        stripped = value.strip() if value else ''
+        if not stripped:
+            return 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80'
         if not (stripped.startswith('http://') or stripped.startswith('https://') or stripped.startswith('/')):
             raise serializers.ValidationError("Image URL must begin with http://, https://, or /.")
         return stripped
@@ -98,4 +102,19 @@ class AiSmartSearchSerializer(serializers.Serializer):
         max_length=500,
         required=True,
         help_text="Natural language query (e.g. 'Sugar-free energy drinks under $5')"
+    )
+
+
+class CatalogCopilotRequestSerializer(serializers.Serializer):
+    """Serializer for Conversational Analytics Copilot input."""
+    query = serializers.CharField(
+        max_length=1000,
+        required=True,
+        help_text="Natural language question about catalog data (e.g. 'Which category has highest average price?')"
+    )
+    history = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        default=list,
+        help_text="Optional conversation history for context"
     )
